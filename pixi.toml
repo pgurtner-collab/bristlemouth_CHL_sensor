@@ -8,7 +8,7 @@ version = "0.13.5"
 [tasks]
 
 [dependencies]
-python = ">=3.10"
+python = ">=3.10,<3.13"
 arm-none-eabi-gcc = "==13.2.rel1"
 clang-tools = ">=15.0.3,<19"
 cmake = "~=3.29.0"
