@@ -4,6 +4,7 @@
 #include "bristlefin.h"
 #include "bsp.h"
 #include "debug.h"
+#include "motor_code.h"
 #include "sensors.h"
 #include "spotter.h"
 #include "stm32_rtc.h"
@@ -12,6 +13,12 @@
 #define LED_ON_TIME_MS 20
 #define LED_PERIOD_MS 1000
 #define CHL_READ_PERIOD_MS 2000
+
+// How often to run the wiper, and how many out-and-back passes each time.
+// 2 sweeps traces 45 -> 135 -> 45 -> 135 -> 45 degrees.
+// TODO: raise to 30 minutes (1800000) once testing is done.
+#define MOTOR_CLEAN_PERIOD_MS 30000
+#define MOTOR_CLEAN_SWEEPS 2
 
 // Chlorophyll concentration calibration, applied to the measured voltage:
 //   CHL concentration = [(Measured Voltage - 0.0235) * 25.4520] ug/L
@@ -43,6 +50,8 @@ void setup(void) {
   vTaskDelay(pdMS_TO_TICKS(5));
   // enable Vout, 12V by default.
   bristlefin.enableVout();
+  // enable 5V out - powers the servo through the PCA9685's V+ terminal.
+  bristlefin.enable5V();
   bristlefin.enable3V();
 
   // Let the ADS1115's supply come up before talking to it.
@@ -51,17 +60,39 @@ void setup(void) {
   if (!chlSensor.init()) {
     printf("ERROR - Failed to initialize ADS1115 chlorophyll sensor!\n");
   }
+
+  // Bring up the wiper servo controller and park the wiper.
+  motorInit();
 }
 
 void loop(void) {
   /* USER LOOP CODE GOES HERE */
+  // Advance any in-progress wiper movement. Non-blocking, so the chlorophyll
+  // sampling below keeps running while the wiper is moving.
+  motorService();
+
+  // Kick off a cleaning cycle every MOTOR_CLEAN_PERIOD_MS.
+  static uint32_t motorCleanTimer = uptimeGetMs();
+  if ((uint32_t)uptimeGetMs() - motorCleanTimer >= MOTOR_CLEAN_PERIOD_MS) {
+    motorCleanTimer = uptimeGetMs();
+    motorStartCleaningCycle(MOTOR_CLEAN_SWEEPS);
+  }
+
   // Read the chlorophyll sensor every CHL_READ_PERIOD_MS and log it.
   static uint32_t chlReadTimer = uptimeGetMs();
   if ((uint32_t)uptimeGetMs() - chlReadTimer >= CHL_READ_PERIOD_MS) {
     chlReadTimer = uptimeGetMs();
 
+    // The wiper physically obstructs the sensor while it moves, so note whether it
+    // was running at any point across the reading. Checked both before and after,
+    // because a cycle can start or finish while the conversion is in flight.
+    const bool motorBusyBefore = motorIsBusy();
+
     float chlVoltage = 0.0f;
     if (chlSensor.readVoltage(chlVoltage)) {
+      const bool duringMotor = motorBusyBefore || motorIsBusy();
+      const char *motorTag = duringMotor ? ", During Motor" : "";
+
       // Convert the measured voltage to a chlorophyll concentration in ug/L.
       const float chlConcentration = (chlVoltage - CHL_VOLTAGE_OFFSET_V) * CHL_UG_PER_L_PER_VOLT;
 
@@ -72,12 +103,12 @@ void loop(void) {
       rtcPrint(rtcTimeBuffer, &time_and_date);
 
       // Log the reading to a file, to the spotter_log_console console, and to the printf console.
-      spotter_log(0, "chl_data.log", USE_TIMESTAMP, "tick: %llu, rtc: %s, chl_ugl: %.6f\n",
-                  uptimeGetMs(), rtcTimeBuffer, chlConcentration);
-      spotter_log_console(0, "[chl] | tick: %llu, rtc: %s, chl_ugl: %.6f", uptimeGetMs(),
-                          rtcTimeBuffer, chlConcentration);
-      printf("[chl] | tick: %llu, rtc: %s, chl_ugl: %.6f\n", uptimeGetMs(), rtcTimeBuffer,
-             chlConcentration);
+      spotter_log(0, "chl_data.log", USE_TIMESTAMP, "tick: %llu, rtc: %s, chl_ugl: %.6f%s\n",
+                  uptimeGetMs(), rtcTimeBuffer, chlConcentration, motorTag);
+      spotter_log_console(0, "[chl] | tick: %llu, rtc: %s, chl_ugl: %.6f%s", uptimeGetMs(),
+                          rtcTimeBuffer, chlConcentration, motorTag);
+      printf("[chl] | tick: %llu, rtc: %s, chl_ugl: %.6f%s\n", uptimeGetMs(), rtcTimeBuffer,
+             chlConcentration, motorTag);
     } else {
       printf("ERROR - Failed to read ADS1115 chlorophyll sensor!\n");
     }
