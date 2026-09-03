@@ -167,6 +167,7 @@ static inline float voltsToUgl(float volts) {
 
 void chlAppApplyConfig(void) {
   chlSensor.setPga((ads1115_pga_e)chlCfg.adsPga);
+  chlSensor.setSaturationCounts((int16_t)chlCfg.satCounts);
 
   motorConfig_t mc = {
       .park_us = (uint16_t)chlCfg.parkUs,
@@ -309,10 +310,12 @@ void chlAppReportNow(void) {
    * `if (spotter_tx_data(...))` is true on FAILURE. The upstream
    * rbr_coda_example gets this backwards and prints "Sucessfully sent" whenever
    * the call actually failed. Compare against BmOK explicitly. */
-  BmErr tx_err = spotter_tx_data(tx_data, CHL_DATA_SIZE, BmNetworkTypeCellularIriFallback);
+  const BmSerialNetworkType net = chlCfg.txCellularOnly ? BmNetworkTypeCellularOnly
+                                                        : BmNetworkTypeCellularIriFallback;
+  BmErr tx_err = spotter_tx_data(tx_data, CHL_DATA_SIZE, net);
   if (tx_err == BmOK) {
-    printf("[chl-agg] | transmit request accepted by Spotter (%u bytes)\n",
-           (unsigned)CHL_DATA_SIZE);
+    printf("[chl-agg] | transmit request accepted by Spotter (%u bytes, %s)\n",
+           (unsigned)CHL_DATA_SIZE, chlCfg.txCellularOnly ? "cellular only" : "cell+iridium");
   } else {
     printf("[chl-agg] | ERR transmit request rejected, BmErr=%d\n", tx_err);
   }
@@ -331,8 +334,14 @@ void chlAppStatus(void) {
   printf("  ADS1115   : %s at 0x%02X, range +-%.3f V, PGA idx %u\n",
          adsReady ? "ready" : "NOT INITIALIZED", (unsigned)chlSensor.getAddress(),
          (double)chlSensor.getFullScaleVolts(), (unsigned)chlSensor.getPga());
-  printf("  calibration: ug/L = (V - %.6f) * %.4f\n", (double)chlCfg.calOffsetV,
-         (double)chlCfg.calScale);
+  printf("  calibration: ug/L = (V - %.6f) * %.4f   (clip flag at %ld counts = %.3f V "
+         "= %.1f ug/L)\n",
+         (double)chlCfg.calOffsetV, (double)chlCfg.calScale, (long)chlCfg.satCounts,
+         (double)((float)chlCfg.satCounts * chlSensor.getLsbVolts()),
+         (double)(((float)chlCfg.satCounts * chlSensor.getLsbVolts() - chlCfg.calOffsetV) *
+                  chlCfg.calScale));
+  printf("  transmit  : %s\n",
+         chlCfg.txCellularOnly ? "cellular only" : "cellular with Iridium fallback");
 
   chlReading_t r = chlAppReadOnce();
   if (r.ok) {
@@ -417,6 +426,7 @@ void setup(void) {
   vTaskDelay(pdMS_TO_TICKS(50));
 
   chlSensor.setPga((ads1115_pga_e)chlCfg.adsPga);
+  chlSensor.setSaturationCounts((int16_t)chlCfg.satCounts);
   adsReady = chlSensor.init();
   if (!adsReady) {
     printf("ERROR - Failed to initialize ADS1115 chlorophyll sensor!\n");

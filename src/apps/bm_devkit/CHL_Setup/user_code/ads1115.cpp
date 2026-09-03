@@ -121,8 +121,7 @@ bool ADS1115::readVoltage(float &voltage, int16_t *counts) {
   }
 
   const int16_t signedCounts = (int16_t)rawCounts;
-  _saturated = (signedCounts >= ADS1115_SATURATION_COUNTS) ||
-               (signedCounts <= -ADS1115_SATURATION_COUNTS);
+  _saturated = (signedCounts >= _satCounts) || (signedCounts <= -_satCounts);
   if (counts != nullptr) {
     *counts = signedCounts;
   }

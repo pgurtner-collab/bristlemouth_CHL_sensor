@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""
+Talk to the CHL node's console.
+
+  ./chl                        interactive console
+  ./chl status                 run one command and print the reply
+  ./chl set chlWipeIntervalMin 10
+  ./chl reset                  board commands work too (reset, bm, gpio, cfg, info)
+  ./chl --watch                follow the console, filtered to CHL lines and errors
+  ./chl --watch --all          follow everything, unfiltered
+  ./chl --spotter status       talk to the Spotter's console instead
+  ./chl --port /dev/cu.X ...   explicit port
+
+Needs only python3 and pyserial:  pip3 install pyserial
+
+The mote exposes two USB serial ports, ending in 1 and 3. The one ending in 1 is
+the console; 3 does nothing useful. This picks the right one on its own.
+"""
+
+import argparse
+import glob
+import sys
+import time
+
+try:
+    import serial
+except ImportError:
+    sys.exit("pyserial is missing.  pip3 install pyserial")
+
+BAUD = 115200
+
+# Lines worth seeing when following the console. Everything containing an error
+# or warning is kept too, so a failure is never filtered into silence.
+KEEP = ("[chl", "[motor", "chl ", "--- ", "ADS1115", "PCA9685", "CHL wiper node")
+ALWAYS = ("ERR", "WARN", "Error", "error", "FAIL", "STALL")
+
+# The board's own housekeeping, printed every couple of seconds. Useful
+# occasionally, noise the rest of the time.
+NOISE = ("hum_temp |", "pressure |", "power |")
+
+# The mote's own top-level console commands, from `help`. Anything else typed
+# here is assumed to be a `chl` subcommand and gets the prefix added, so
+# `./chl status` does what it looks like it does while `./chl reset` and
+# `./chl bm neighbors` still reach the board's own commands.
+TOP_LEVEL = {
+    "help", "info", "debug", "reset", "bootloader", "memfault", "gpio",
+    "spotter", "rtc", "w25", "nvm", "pluart", "dfu", "bm", "stress", "cfg",
+    "bmsrv", "chl",
+}
+
+
+def as_console_command(words):
+    """Turn shell-side words into the line the board expects."""
+    if not words:
+        return ""
+    # `cfg` is the one genuine collision: the board has a `cfg` command and so
+    # does the chl app. The board's always takes a partition first
+    # (`cfg usr set ...`), so that disambiguates it; a bare `cfg` means the chl
+    # config table, which is what anyone typing it here wants.
+    if words[0] == "cfg":
+        if len(words) > 1 and words[1] in ("usr", "hw", "sys"):
+            return " ".join(words)
+        return "chl " + " ".join(words)
+    if words[0] in TOP_LEVEL:
+        return " ".join(words)
+    return "chl " + " ".join(words)
+
+
+def find_port(spotter=False):
+    if spotter:
+        for pat in ("/dev/cu.usbmodemSPOT*", "/dev/tty.usbmodemSPOT*"):
+            hits = sorted(glob.glob(pat))
+            if hits:
+                return hits[0]
+        sys.exit("No Spotter serial port found. Is its USB plugged in?")
+
+    # Mote console is the port whose name ends in '1'.
+    hits = [p for p in sorted(glob.glob("/dev/cu.usbmodem*")) if p.endswith("1")]
+    hits = [p for p in hits if "SPOT" not in p]
+    if not hits:
+        sys.exit(
+            "No mote serial port found.\n"
+            "Plug the Dev Kit's USB-C into this machine and check with: ls /dev/cu.*"
+        )
+    if len(hits) > 1:
+        sys.exit(f"Several candidate ports: {hits}\nPick one with --port")
+    return hits[0]
+
+
+def keep_line(line, mode):
+    """mode: "raw" keeps everything, "response" drops only the board's
+    housekeeping chatter, "watch" keeps CHL lines and anything that looks like a
+    problem."""
+    if mode == "raw":
+        return True
+    if any(a in line for a in ALWAYS):
+        return True
+    if any(n in line for n in NOISE):
+        return False
+    if mode == "response":
+        return True
+    return any(k in line for k in KEEP)
+
+
+def read_for(ser, seconds, mode="watch", stamp=False):
+    """Read for a while, printing lines that pass the filter."""
+    deadline = time.time() + seconds
+    buf = b""
+    while time.time() < deadline:
+        buf += ser.read(4096)
+        while b"\n" in buf:
+            raw, buf = buf.split(b"\n", 1)
+            line = raw.decode("utf-8", "replace").rstrip("\r")
+            if not line:
+                continue
+            if keep_line(line, mode):
+                prefix = time.strftime("[%H:%M:%S] ") if stamp else ""
+                print(prefix + line, flush=True)
+    return buf
+
+
+def send(ser, cmd):
+    ser.reset_input_buffer()
+    ser.write((cmd + "\n").encode())
+    ser.flush()
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--port")
+    ap.add_argument("--spotter", action="store_true")
+    ap.add_argument("--watch", action="store_true")
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--wait", type=float, default=2.5,
+                    help="seconds to listen after sending a command")
+    ap.add_argument("-h", "--help", action="store_true")
+    args, rest = ap.parse_known_args()
+
+    if args.help:
+        print(__doc__)
+        return
+
+    port = args.port or find_port(args.spotter)
+    ser = serial.Serial(port, BAUD, timeout=0.2)
+    time.sleep(0.3)
+
+    if args.watch:
+        which = "Spotter" if args.spotter else "mote"
+        print(f"Following the {which} console on {port}. Ctrl-C to stop.")
+        if not args.all:
+            print("Filtered to CHL/wiper lines and anything with an error. "
+                  "Add --all for everything.\n")
+        try:
+            while True:
+                read_for(ser, 1.0, "raw" if args.all else "watch", stamp=True)
+        except KeyboardInterrupt:
+            print()
+        return
+
+    if rest:
+        send(ser, as_console_command(rest))
+        read_for(ser, args.wait, "raw" if args.all else "response")
+        return
+
+    # Interactive.
+    print(f"Connected to {port}. Try `status`, `cfg`, `jog 1100`, or `help`.")
+    print("A bare word is treated as a `chl` subcommand; `reset`, `bm`, `gpio` "
+          "etc. reach the board's own commands.")
+    print("Blank line just listens. Ctrl-C or `exit` to quit.\n")
+    try:
+        while True:
+            try:
+                cmd = input("> ").strip()
+            except EOFError:
+                break
+            if cmd in ("exit", "quit"):
+                break
+            if cmd:
+                send(ser, as_console_command(cmd.split()))
+            read_for(ser, args.wait if cmd else 2.0,
+                     "response" if cmd else "watch")
+    except KeyboardInterrupt:
+        print()
+
+
+if __name__ == "__main__":
+    main()

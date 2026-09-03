@@ -63,6 +63,8 @@ typedef struct {
   uint32_t adsPga;
   uint32_t rawLog;
   uint32_t wipeOnBoot;
+  uint32_t satCounts;
+  uint32_t txCellularOnly;
   float calOffsetV;
   float calScale;
 } chlConfig_t;

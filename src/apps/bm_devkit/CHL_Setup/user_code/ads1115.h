@@ -51,9 +51,17 @@ typedef enum {
   ADS1115_PGA_COUNT
 } ads1115_pga_e;
 
-// Counts at or beyond this are close enough to the +-32767 rail that the
-// reading should be treated as clipped rather than as a measurement.
-#define ADS1115_SATURATION_COUNTS 32000
+/* Default clipping threshold, in counts.
+ *
+ * Deliberately NOT the +-32767 end of the PGA's range. What limits an ADS1115
+ * input is the supply, not the selected range: the absolute maximum on an analog
+ * input is VDD + 0.3 V however wide the PGA is set. On a 3V3 rail with the
+ * +-4.096 V range that puts the real ceiling near 3.3 V = 26,400 counts, so a
+ * threshold of 32,000 would never fire on a signal pinned against the supply.
+ *
+ * Overridable at runtime with setSaturationCounts(), because the right value
+ * depends on which rail the breakout is actually powered from. */
+#define ADS1115_SATURATION_COUNTS 26000
 
 // Driver for the TI ADS1115 16-bit I2C ADC, used here to read the analog
 // output of a chlorophyll sensor board wired to the AIN0/AIN1 differential
@@ -95,11 +103,16 @@ public:
   /*! True if the last reading was close enough to the rail to be suspect. */
   bool lastReadSaturated() const { return _saturated; }
 
+  /*! Set the count threshold at which a reading is called clipped. */
+  void setSaturationCounts(int16_t counts) { _satCounts = counts; }
+  int16_t getSaturationCounts() const { return _satCounts; }
+
 private:
   bool readReg(uint8_t reg, uint16_t &value);
   bool writeReg(uint8_t reg, uint16_t value);
   uint16_t configWord() const;
 
   ads1115_pga_e _pga = ADS1115_PGA_4V096;
+  int16_t _satCounts = ADS1115_SATURATION_COUNTS;
   bool _saturated = false;
 };

@@ -37,9 +37,15 @@ static const chlCfgEntry_t kTable[] = {
      "how often the ADC is read (needs reset)",
      {.u = 1000}, {.u = 100}, {.u = 60000}},
 
+    /* 10 minutes. The power cost is genuinely negligible - a cycle is ~2.4 J, so
+     * 144 a day is 0.1 Wh against a ~30 Wh/day solar budget, and an overnight
+     * 12 hours of wiping is 0.05 Wh out of a ~30 Wh usable battery. What this
+     * interval actually spends is servo and brush life: 144 cycles a day is
+     * ~4,300 a month, and the wear limit on a hobby servo's gears and pot is far
+     * less well characterised than its current draw. */
     {"chlWipeIntervalMin", CHL_CFG_UINT, "min",
      "minutes between wiper cycles, 0 disables wiping",
-     {.u = 30}, {.u = 0}, {.u = 1440}},
+     {.u = 10}, {.u = 0}, {.u = 1440}},
 
     {"chlWipeSweeps", CHL_CFG_UINT, "count",
      "out-and-back passes per cycle",
@@ -85,18 +91,47 @@ static const chlCfgEntry_t kTable[] = {
      "1 = run one wiper cycle shortly after startup",
      {.u = 1}, {.u = 0}, {.u = 1}},
 
-    /* Turner Designs C-FLUOR calibration, from the unit's certificate:
-     *     ug/L = (measured volts - offset) * scale
-     * These MUST match the certificate for the specific sensor head in use.
-     * The defaults are the values inherited from the original firmware and are
-     * a placeholder until the certificate is checked. */
+    /* Counts at which a reading is called clipped.
+     *
+     * NOT the PGA's own full scale. The ADS1115 runs from the 3V3 rail here, and
+     * an analog input cannot go above VDD + 0.3 V whatever range is selected, so
+     * the real ceiling is ~3.3 V = 26,400 counts, not the 32,767 the +-4.096 V
+     * range implies. Watching for 32,000 would mean a signal pinned against the
+     * supply never raised a flag at all.
+     *
+     * Clipping above 3.3 V is accepted for this deployment: with the C-FLUOR's
+     * calibration that is ~81 ug/L, far above anything this water will produce.
+     * The flag exists to make it visible if that assumption is ever wrong. */
+    {"chlSatCounts", CHL_CFG_UINT, "counts",
+     "reading is flagged as clipped at or above this; 26000 ~= 3.25 V on a 3V3 supply",
+     {.u = 26000}, {.u = 1000}, {.u = 32767}},
+
+    /* Cellular only, no Iridium fallback.
+     *
+     * BmNetworkTypeCellularIriFallback would silently switch to Iridium if
+     * cellular were unavailable, and Iridium is billed per message. At 144
+     * packets a day that is not a fallback, it is a bill. This buoy sits ~10 km
+     * off Naples FL where cellular should hold, and if it does not the packets
+     * still reach the Spotter's SD card to be recovered on retrieval - late data
+     * rather than expensive data. Set to 0 before any offshore deployment. */
+    {"chlTxCellularOnly", CHL_CFG_UINT, "bool",
+     "1 = cellular only; 0 = allow Iridium fallback (billed per message)",
+     {.u = 1}, {.u = 0}, {.u = 1}},
+
+    /* Turner Designs C-FLUOR calibration, from this sensor head's certificate:
+     *     ug/L = (measured volts - offset) * coefficient
+     * Confirmed by Mark against the certificate, 2026-09-03. The values the
+     * first version of this app carried (0.0235 V, 25.4520 ug/L/V) were close
+     * but not this unit's, so anything logged before that date is off by ~3%
+     * in slope and ~0.06 ug/L in offset. Recomputable from the volts_mean field
+     * carried in every packet. */
     {"chlCalOffsetV", CHL_CFG_FLOAT, "V",
-     "Turner cal: blank/offset voltage",
-     {.f = 0.0235f}, {.f = -1.0f}, {.f = 5.0f}},
+     "Turner cal: blank/offset voltage in pure water",
+     {.f = 0.0291f}, {.f = -1.0f}, {.f = 5.0f}},
 
     {"chlCalScale", CHL_CFG_FLOAT, "ug/L/V",
      "Turner cal: coefficient, micrograms per litre per volt",
-     {.f = 25.4520f}, {.f = 0.0001f}, {.f = 100000.0f}},
+     {.f = 24.6872f}, {.f = 0.0001f}, {.f = 100000.0f}},
 };
 
 static const size_t kTableCount = sizeof(kTable) / sizeof(kTable[0]);
@@ -121,6 +156,8 @@ static void *fieldFor(const char *key) {
   if (!strcmp(key, "chlAdsPga")) return &chlCfg.adsPga;
   if (!strcmp(key, "chlRawLog")) return &chlCfg.rawLog;
   if (!strcmp(key, "chlWipeOnBoot")) return &chlCfg.wipeOnBoot;
+  if (!strcmp(key, "chlSatCounts")) return &chlCfg.satCounts;
+  if (!strcmp(key, "chlTxCellularOnly")) return &chlCfg.txCellularOnly;
   if (!strcmp(key, "chlCalOffsetV")) return &chlCfg.calOffsetV;
   if (!strcmp(key, "chlCalScale")) return &chlCfg.calScale;
   return nullptr;
