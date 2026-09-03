@@ -4,6 +4,8 @@ set(APP_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/user_code/user_code.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/user_code/ads1115.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/user_code/motor_code.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/user_code/chl_config.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/user_code/chl_cli.cpp
 )
 
 set(APP_INCLUDES

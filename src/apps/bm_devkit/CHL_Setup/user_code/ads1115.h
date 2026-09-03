@@ -11,27 +11,57 @@
 #define ADS1115_REG_POINTER_CONVERSION 0x00
 #define ADS1115_REG_POINTER_CONFIG 0x01
 
-// Config register value: single-shot conversion, AIN0-AIN1 differential input,
-// +-4.096V full-scale range, 128 SPS, comparator disabled. MODE (bit 8) = 1 selects
-// single-shot, so the device converts once and then powers back down rather than
-// running continuously. Writing OS (bit 15) = 1 is what triggers each conversion.
-#define ADS1115_CONFIG_SINGLESHOT_DIFF01_4V096_128SPS 0x8383
+/* Config register bit layout (TI ADS1115 datasheet, table 8-4):
+ *   [15]    OS         1 on write starts a conversion; 1 on read means idle
+ *   [14:12] MUX        000 = AIN0-AIN1 differential (what we use)
+ *   [11:9]  PGA        full-scale range, see ads1115_pga_e
+ *   [8]     MODE       1 = single-shot, 0 = continuous
+ *   [7:5]   DR         100 = 128 SPS
+ *   [4:0]   comparator 00011 = disabled
+ *
+ * Everything except PGA is fixed, so the base value below has PGA = 0 and
+ * the selected range is OR'd in. */
+#define ADS1115_CONFIG_BASE 0x8183 // OS=1, MUX=AIN0-AIN1, MODE=single-shot, 128SPS, comp off
+#define ADS1115_CONFIG_PGA_SHIFT 9
+#define ADS1115_CONFIG_PGA_MASK 0x0E00
 
-// Same settings but with MODE (bit 8) = 0, i.e. continuous conversion. Kept for
-// reference; the driver uses single-shot so that every reading is one it explicitly
-// asked for, which makes a stale or frozen conversion register obvious.
-#define ADS1115_CONFIG_CONTINUOUS_DIFF01_4V096_128SPS 0x8283
-
-// OS is bit 15 of the config register. Written as 1 it starts a conversion. Read
-// back, 0 means a conversion is in progress and 1 means the device is idle/done.
+// OS is bit 15. Written as 1 it starts a conversion. Read back, 0 means a
+// conversion is in progress and 1 means the device is idle/done.
 #define ADS1115_CONFIG_OS_MASK 0x8000
 
 // A conversion at 128 SPS takes ~7.8ms. Poll a bit longer than that before giving up.
 #define ADS1115_CONVERSION_POLL_MS 2
 #define ADS1115_CONVERSION_POLL_TRIES 15
 
-// Volts per ADC count for the +-4.096V full-scale range (4.096V / 2^15 counts).
-#define ADS1115_LSB_VOLTS_4V096 0.000125f
+/* Full-scale range selection.
+ *
+ * IMPORTANT: the PGA setting does NOT change what voltage the part can safely
+ * accept. The absolute maximum on any analog input is VDD + 0.3 V regardless of
+ * range, so selecting +-6.144 V on a 3.3 V supply does not make a 5 V signal
+ * readable - it just clips at the supply while the input protection diodes
+ * conduct. Pick the smallest range that still covers the real signal swing:
+ * a smaller range is quieter, because the LSB shrinks with it. */
+typedef enum {
+  ADS1115_PGA_6V144 = 0,
+  ADS1115_PGA_4V096 = 1,
+  ADS1115_PGA_2V048 = 2,
+  ADS1115_PGA_1V024 = 3,
+  ADS1115_PGA_0V512 = 4,
+  ADS1115_PGA_0V256 = 5,
+  ADS1115_PGA_COUNT
+} ads1115_pga_e;
+
+/* Default clipping threshold, in counts.
+ *
+ * Deliberately NOT the +-32767 end of the PGA's range. What limits an ADS1115
+ * input is the supply, not the selected range: the absolute maximum on an analog
+ * input is VDD + 0.3 V however wide the PGA is set. On a 3V3 rail with the
+ * +-4.096 V range that puts the real ceiling near 3.3 V = 26,400 counts, so a
+ * threshold of 32,000 would never fire on a signal pinned against the supply.
+ *
+ * Overridable at runtime with setSaturationCounts(), because the right value
+ * depends on which rail the breakout is actually powered from. */
+#define ADS1115_SATURATION_COUNTS 26000
 
 // Driver for the TI ADS1115 16-bit I2C ADC, used here to read the analog
 // output of a chlorophyll sensor board wired to the AIN0/AIN1 differential
@@ -40,14 +70,49 @@ class ADS1115 : public AbstractI2C {
 public:
   ADS1115(I2CInterface_t *interface, uint8_t address = ADS1115_ADDR_GND);
 
+  /*! Configure the part. Applies whatever range setPga() last selected. */
   bool init();
 
   /*! Address currently in use. */
   uint8_t getAddress() const { return (uint8_t)_addr; }
 
-  bool readVoltage(float &voltage);
+  /*!
+   Select the full-scale range. Takes effect on the next conversion; safe to call
+   at any time. Out-of-range values are rejected rather than silently clamped.
+  */
+  bool setPga(ads1115_pga_e pga);
+  ads1115_pga_e getPga() const { return _pga; }
+
+  /*! Full-scale voltage of the range currently selected, for logging. */
+  float getFullScaleVolts() const;
+
+  /*! Volts per count of the range currently selected. */
+  float getLsbVolts() const;
+
+  /*!
+   Trigger one conversion and return the result.
+
+   \param[out] voltage Result in volts
+   \param[out] counts  Raw signed conversion result, or nullptr if not wanted.
+                       Worth logging: it is the only way to tell a genuine
+                       near-full-scale reading from a clipped one.
+   \return true if the conversion completed
+  */
+  bool readVoltage(float &voltage, int16_t *counts = nullptr);
+
+  /*! True if the last reading was close enough to the rail to be suspect. */
+  bool lastReadSaturated() const { return _saturated; }
+
+  /*! Set the count threshold at which a reading is called clipped. */
+  void setSaturationCounts(int16_t counts) { _satCounts = counts; }
+  int16_t getSaturationCounts() const { return _satCounts; }
 
 private:
   bool readReg(uint8_t reg, uint16_t &value);
   bool writeReg(uint8_t reg, uint16_t value);
+  uint16_t configWord() const;
+
+  ads1115_pga_e _pga = ADS1115_PGA_4V096;
+  int16_t _satCounts = ADS1115_SATURATION_COUNTS;
+  bool _saturated = false;
 };
