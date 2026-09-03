@@ -15,7 +15,18 @@ BUS_V = 23.8            # measured, INA232 0x43
 I_NODE_IDLE_MA = 18.0   # mote + Bristlefin, rails up, servo released (range 14.5-22.5)
 I_WIPE_MEAN_MA = 47.0   # mean over a cycle
 I_WIPE_PEAK_MA = 242.0  # highest 4.5 ms average seen
-WIPE_S = 3.22           # measured duration, 2 sweeps
+# Measured duration of a 2-sweep cycle over a 915 us span (45-135 deg), at
+# 800 ms per leg. Full-range sweeps scale from this.
+WIPE_S_90DEG = 3.22
+TRAVEL_MS_90DEG = 800
+SPAN_US_90DEG = 1973 - 1058
+
+# Full mechanical range, which is what the wiper now uses: further off the
+# optical face between wipes means less reflected light, and more travel per
+# cycle means more of the window swept.
+SPAN_US_FULL = 2400 - 600
+TRAVEL_MS_FULL = round(TRAVEL_MS_90DEG * SPAN_US_FULL / SPAN_US_90DEG / 50) * 50
+WIPE_S = 4 * TRAVEL_MS_FULL / 1000   # 2 sweeps = 4 legs
 
 # --- Turner Designs C-FLUOR datasheet ---
 CFLUOR_MA_AT_12V = 22.0 # "<=22mA at 12VDC"
@@ -90,6 +101,9 @@ def main():
     print(f"Bus {BUS_V} V | node idle {I_NODE_IDLE_MA} mA "
           f"| C-FLUOR {CFLUOR_MA_AT_12V} mA @12V (T99 {CFLUOR_T99_S}s)")
     print(f"Rail-on draw {bus_on_w():.3f} W | one wipe costs {wipe_extra_j():.2f} J extra")
+    print(f"Wiper: full range, {SPAN_US_FULL} us span, {TRAVEL_MS_FULL} ms/leg, "
+          f"{WIPE_S:.1f} s per 2-sweep cycle "
+          f"(was {WIPE_S_90DEG:.1f} s over {SPAN_US_90DEG} us)")
     print(f"Dead time per power-on: {WIPE_DELAY_S + WIPE_S + SETTLE_S + TX_MARGIN_S:.1f} s "
           f"(wipe delay + wipe + settle + transmit margin)")
     print(f"Platform: {SOLAR_WH_DAY} Wh/day solar, Spotter baseline "
@@ -97,11 +111,12 @@ def main():
           f"~{SOLAR_WH_DAY - SPOTTER_BASELINE_W * 24:.0f} Wh/day for Bristlemouth\n")
 
     opts = [
-        evaluate("A  always on, wipe/10 min", None, 600, always_on=True, wipe_interval_min=10),
-        evaluate("B  60 s every 20 min", 1200, 60),
-        evaluate("C  as-found: 30 s every 5 min", 300, 30),
-        evaluate("D  120 s every 20 min", 1200, 120),
-        evaluate("E  180 s every 30 min", 1800, 180),
+        evaluate("as-found: 30 s every 5 min", 300, 30),
+        evaluate("60 s every 10 min", 600, 60),
+        evaluate("90 s every 10 min  <-- proposed", 600, 90),
+        evaluate("120 s every 10 min", 600, 120),
+        evaluate("120 s every 20 min", 1200, 120),
+        evaluate("always on, wipe/10 min", None, 600, always_on=True, wipe_interval_min=10),
     ]
 
     hdr = (f"{'option':<30}{'duty':>7}{'samples':>9}{'Wh/day':>9}{'%solar':>8}"
@@ -112,6 +127,13 @@ def main():
         print(f"{o['name']:<30}{o['duty_pct']:>6.1f}%{o['n_samples']:>9}"
               f"{o['total_wh']:>9.2f}{o['pct_solar']:>7.1f}%{o['wipes_year']:>10,.0f}"
               f"{o['packets_day']:>10.0f}{o['kb_day']:>8.1f}")
+
+    print("\nWiper duty:")
+    for o in opts:
+        deg_per_cycle = 4 * 177.0 * SPAN_US_FULL / 1800
+        print(f"  {o['name']:<34} {o['wipes_day']:>6.0f} cycles/day  "
+              f"{o['wipes_year']:>9,.0f}/yr  "
+              f"{o['wipes_day'] * deg_per_cycle / 360:>7,.0f} servo rev-equiv/day")
 
     print("\nEnergy split (rail vs wiper):")
     for o in opts:

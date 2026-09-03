@@ -369,10 +369,20 @@ void chlAppStatus(void) {
          motorIsBusy() ? "MOVING" : "idle", motorGetPulseUs());
   printf("  endpoints : park %u us, sweep %u us, travel %u ms, %u sweeps, stall > %u mA\n",
          mc.park_us, mc.sweep_us, mc.travel_ms, mc.sweeps, mc.stall_ma);
-  if (chlCfg.wipeIntervalMin == 0) {
-    printf("  schedule  : WIPING DISABLED (chlWipeIntervalMin = 0)\n");
+  /* Report what will actually happen, not what one key says in isolation. The
+   * boot wipe and the free-running interval are independent, so "interval = 0"
+   * alone means nothing - with chlWipeOnBoot set it is the normal duty-cycled
+   * configuration, and only both being off is genuinely no wiping. */
+  if (chlCfg.wipeOnBoot && chlCfg.wipeIntervalMin) {
+    printf("  schedule  : once per power-on, plus every %lu min while powered\n",
+           (unsigned long)chlCfg.wipeIntervalMin);
+  } else if (chlCfg.wipeOnBoot) {
+    printf("  schedule  : once per power-on (the bus interval sets the wipe interval)\n");
+  } else if (chlCfg.wipeIntervalMin) {
+    printf("  schedule  : every %lu min while powered, none on boot\n",
+           (unsigned long)chlCfg.wipeIntervalMin);
   } else {
-    printf("  schedule  : every %lu min\n", (unsigned long)chlCfg.wipeIntervalMin);
+    printf("  schedule  : NO WIPING (chlWipeOnBoot = 0 and chlWipeIntervalMin = 0)\n");
   }
   if (w.valid) {
     printf("  last wipe : #%u at uptime %lus, %u ms, base %u mA, mean %u mA, peak %u mA, "
@@ -505,25 +515,32 @@ void loop(void) {
     everWiped = true;
   }
 
-  // Kick off a cleaning cycle on schedule. Interval 0 disables wiping entirely,
-  // which is what you want when bench-testing the optics.
+  /* Wipe once shortly after every power-on, independently of the free-running
+   * interval below.
+   *
+   * These have to be separate. On a duty-cycled Bristlemouth bus the node's
+   * uptime resets every power window, so a free-running interval longer than the
+   * window never fires and the boot wipe IS the whole schedule. Gating the boot
+   * wipe on chlWipeIntervalMin > 0 - as this did until 2026-09-03 - meant that
+   * setting the interval to 0 to disable the useless timer silently disabled all
+   * wiping, and the first packet after the change reported wipes=0. */
+  static bool bootWipeDone = false;
   static uint32_t motorCleanTimer = 0;
-  static bool firstWipeDone = false;
-  if (chlCfg.wipeIntervalMin > 0) {
-    if (!firstWipeDone) {
-      if ((uint32_t)uptimeGetMs() >= chlCfg.firstWipeDelayMs) {
-        firstWipeDone = true;
-        motorCleanTimer = (uint32_t)uptimeGetMs();
-        if (chlCfg.wipeOnBoot) {
-          motorStartCleaningCycle((uint8_t)chlCfg.wipeSweeps);
-        }
-      }
-    } else {
-      const uint32_t intervalMs = chlCfg.wipeIntervalMin * 60000UL;
-      if ((uint32_t)uptimeGetMs() - motorCleanTimer >= intervalMs) {
-        motorCleanTimer += intervalMs;
-        motorStartCleaningCycle((uint8_t)chlCfg.wipeSweeps);
-      }
+  if (!bootWipeDone && (uint32_t)uptimeGetMs() >= chlCfg.firstWipeDelayMs) {
+    bootWipeDone = true;
+    motorCleanTimer = (uint32_t)uptimeGetMs();
+    if (chlCfg.wipeOnBoot) {
+      motorStartCleaningCycle((uint8_t)chlCfg.wipeSweeps);
+    }
+  }
+
+  // Additional cycles on a timer, for a bus that is left powered continuously.
+  // Useless when the bus is duty-cycled, hence 0 being a normal setting.
+  if (chlCfg.wipeIntervalMin > 0 && bootWipeDone) {
+    const uint32_t intervalMs = chlCfg.wipeIntervalMin * 60000UL;
+    if ((uint32_t)uptimeGetMs() - motorCleanTimer >= intervalMs) {
+      motorCleanTimer += intervalMs;
+      motorStartCleaningCycle((uint8_t)chlCfg.wipeSweeps);
     }
   }
 

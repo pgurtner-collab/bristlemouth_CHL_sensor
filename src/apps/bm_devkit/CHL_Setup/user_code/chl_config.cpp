@@ -81,9 +81,13 @@ static const chlCfgEntry_t kTable[] = {
      * interval actually spends is servo and brush life: 144 cycles a day is
      * ~4,300 a month, and the wear limit on a hobby servo's gears and pot is far
      * less well characterised than its current draw. */
+    /* EXTRA cycles on a free-running timer, on top of the boot wipe. 0 is a
+     * normal setting, not a disabled one: on a duty-cycled bus the node's uptime
+     * resets every power window, so an interval longer than the window can never
+     * fire and chlWipeOnBoot is the entire schedule. */
     {"chlWipeIntervalMin", CHL_CFG_UINT, "min",
-     "minutes between wiper cycles, 0 disables wiping",
-     {.u = 10}, {.u = 0}, {.u = 1440}},
+     "EXTRA cycles this many minutes apart; 0 = boot wipe only (see chlWipeOnBoot)",
+     {.u = 0}, {.u = 0}, {.u = 1440}},
 
     {"chlWipeSweeps", CHL_CFG_UINT, "count",
      "out-and-back passes per cycle",
@@ -131,8 +135,11 @@ static const chlCfgEntry_t kTable[] = {
      "1 = log every individual ADC sample, not just the window",
      {.u = 0}, {.u = 0}, {.u = 1}},
 
+    /* On a duty-cycled bus this is the wiper schedule: one cycle per power-on,
+     * so the bus interval sets the wipe interval. Independent of
+     * chlWipeIntervalMin - conflating the two disabled all wiping once. */
     {"chlWipeOnBoot", CHL_CFG_UINT, "bool",
-     "1 = run one wiper cycle shortly after startup",
+     "1 = one wiper cycle after every power-on; on a duty-cycled bus this IS the schedule",
      {.u = 1}, {.u = 0}, {.u = 1}},
 
     /* Counts at which a reading is called clipped.
