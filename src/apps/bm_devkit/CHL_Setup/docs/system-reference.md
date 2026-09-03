@@ -141,25 +141,39 @@ saturates the fluorometer, and the ceiling the reading hits discriminates:
 If a divider *is* fitted, the fix is config only, no reflash: set
 `chlCalScale` to `24.6872 × 3 = 74.0616` and `chlCalOffsetV` to `0.0291 / 3 = 0.0097`.
 
-### 2.5 ⚠️ Servo power — two documents disagree [?]
+### 2.5 Servo power — external 12 V → 5 V buck, resolved
 
-| Source | Says |
-|---|---|
-| [D] | Servo rail from an **external 5 V/6 V buck** (Pololu D24V22F5) off VOUT, EN driven by IO1, with a 4700 µF bulk cap for inrush |
-| [C] | `bristlefin.enable5V()` — "powers the servo through the PCA9685's V+ terminal", i.e. the **Dev Board's own 5 V rail** |
+**A dedicated 12 V → 5 V buck converter off VOUT powers the servo**, feeding the
+PCA9685's V+ terminal. Confirmed by Mark 2026-09-03 [M].
 
-The same design doc states the Dev Board 5 V rail is only 300 mA [D]. Measured
-bus peak during a wipe is 241 mA at 23.8 V ≈ 5.3 W above idle [M], which at 5 V
-would be roughly 1 A — over that limit.
+```
+VBUS (24 V)
+  └── VOUT buck (12 V, on-board)
+        ├── C-FLUOR            (12 V, <=22 mA)
+        └── 12 V -> 5 V buck ── PCA9685 V+ ── servo power
+```
 
-It demonstrably works, and has for dozens of cycles with no stall or brownout
-[M], so this is not urgent. But **nobody has verified which arrangement is
-physically built**, and it matters for reliability. Trace it before deployment.
+This matters, because the alternative reading — the code comment in `setup()`
+says `bristlefin.enable5V()` "powers the servo through the PCA9685's V+
+terminal", i.e. the Dev Board's own 5 V rail — would have been a problem. That
+rail is rated 300 mA [D], and the measured 241 mA bus peak at 23.8 V is ~5.3 W
+above idle [M], which at 5 V is roughly 1 A. The external buck has the headroom;
+the Dev Board rail would not have.
 
-The firmware contains an unused helper to drive IO1 as a servo-rail enable
+`bristlefin.enable5V()` in `setup()` is therefore not what powers the servo. It
+is harmless and left in place.
+
+**Not verified [?]:** whether the buck's EN pin is driven by IO1 as the design
+intends, or simply tied on. If it is tied on, the servo rail is live whenever
+VOUT is — which the measured 14–21 mA idle already accounts for, so it costs
+nothing detectable, but it means the rail cannot be shed independently. The
+firmware carries an unused IO1 servo-rail-enable helper if that is ever wanted
 (BF_IO1 is hardcoded INPUT in a const struct upstream, so it needs a named
-`PCA9535Pin_t` override) — relevant if the external-buck arrangement is the real
-one.
+`PCA9535Pin_t` override).
+
+**Also unverified [?]:** whether the 4700 µF bulk capacitor specified in [D] is
+fitted. Its job is absorbing servo inrush so it is not drawn through the
+Bristlemouth bus.
 
 ### 2.6 PCA9685 ALL-CALL vs the I2C mux
 
@@ -576,11 +590,58 @@ regardless of traffic.
 
 | | Status |
 |---|---|
-| **The divider question (§2.4)** | **Unresolved — a 3× error if wrong. `tools/light_test.py` settles it.** |
-| **C-FLUOR light test** | Not yet done. Nothing downstream is trustworthy until it is. |
-| **Wiper endpoints in the sensor's frame** | 2400 = rest, 600 = sweep set; not yet verified against the optical face |
-| Servo power path (§2.5) | Two documents disagree; as-built unverified |
+| ~~The divider question~~ | **Resolved 2026-09-03** — no divider, straight-piped. Firmware correct as built. |
+| ~~C-FLUOR light test~~ | **Passed 2026-09-03** — reading drove to the rail under a torch. |
+| ~~Servo power path~~ | **Resolved 2026-09-03** — dedicated 12 V → 5 V buck off VOUT. |
+| **Wet test before sealing** | See §10. The wiper's torque margin in water is untested and is the real risk. |
+| Wiper endpoints in the sensor's frame | 2400 = rest, 600 = sweep; endpoints set, optical-face check outstanding |
+| Buck EN on IO1, and the bulk capacitor | Present-or-not unverified; neither is load-bearing today |
 | Temperature reporting | Not yet seen since the topology change; `samplesPerReport` now 1, watching |
 | `chlStallMa` = 450 mA | Based on 241 mA peaks over dozens of cycles, not a stalled measurement |
 | PCA9685 ALL-CALL window at boot | Firmware mitigates; the hardware fix is VCC on the switched 5 V rail |
 | Bulk capacitor | Specified in [D]; presence unverified |
+
+---
+
+## 10. Before sealing it up — do a wet test
+
+The torch test proved the optical and electrical chain: the C-FLUOR drives the
+ADC, the calibration is applied to the right voltage, and the reading saturates
+under strong light. That is the whole signal path, verified.
+
+**It proved nothing about the wiper in water, and that is the untested risk.**
+
+Every wiper current figure in this document — 43–46 mA mean, 201–241 mA peak, and
+the 450 mA `chlStallMa` threshold derived from them — was measured **in air**.
+Brush drag in water is substantially higher. If the servo stalls or the sweep
+truncates once submerged, the antifouling scheme fails silently and the first
+evidence is fouled optics weeks into a deployment.
+
+**A bucket of water is worth more than a rhodamine standard.** What it uniquely
+catches:
+
+| | |
+|---|---|
+| Servo torque margin under real drag | the actual reason to do this |
+| Whether the sweep completes in `chlTravelMs` when loaded | a truncated sweep leaves an unwiped arc |
+| A realistic `chlStallMa` | today's 450 mA is scaled off air measurements |
+| Brush contact and window clearing | dry contact tells you little |
+| Bubbles trapped on the optical face | a real and common failure |
+| Leaks, before anything is committed | |
+
+Procedure: submerge, `chl wipe`, and read `peak` and `duration` off the cycle
+line. If peak climbs toward 450 mA, raise `chlTravelMs` before raising
+`chlStallMa` — a slower sweep draws less, and the window is long enough to
+afford it.
+
+**On rhodamine specifically:** worth doing if it is to hand, but it answers a
+smaller question than it appears to. Rhodamine WT is a *secondary* standard — it
+fluoresces near enough the chlorophyll band to confirm the instrument responds
+proportionally and stably, but it does not validate the µg/L scale, because the
+Turner coefficient is for chlorophyll. It checks linearity and drift, not
+accuracy. Turner sell a solid secondary standard for the same purpose and it is
+more repeatable than mixing a dye.
+
+Priority: **wet wiper test first, rhodamine second.** One tests a mechanism that
+could fail in the water; the other refines a number already taken from a
+calibration certificate.
