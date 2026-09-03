@@ -634,6 +634,39 @@ dur 6233ms | temp 3 rows, positions [1, 2, 4]
 90 s rail drop; `n_dirty 9` is exactly the 6.2 s wipe plus 3 s settle excluded from
 the average, which is the wipe-exclusion logic doing its job on real data.
 
+### Data durability — three layers, none of them ours to build
+
+An earlier version of these notes claimed the node has "no local buffering" and
+that a window is lost if the Spotter is unreachable when it closes. **That was
+wrong on both counts.**
+
+| Layer | What it covers | Verified |
+|---|---|---|
+| Spotter message queue | cellular outage — persists and retries | Sofar's, by design |
+| `chl_agg.log` on the Spotter SD | any radio failure; full text record per window | **`log list` index 58, 6325 bytes and growing** [M 2026-09-03] |
+| `raw_hex` in the dashboard archive | decoder bugs, packet layout changes | [M] |
+
+The `chl_agg.log` channel is worth checking on any new Spotter rather than
+assumed: on the PAR project the equivalent `par_agg` channel was registered and
+returned `BmOK` while writing **zero bytes**. Non-zero and growing is the test.
+At ~250 characters per line, 6325 bytes is ~25 windows, which matched the number
+run that day.
+
+And the scenario the old note warned about cannot arise. **The Spotter powers the
+bus.** If it is unreachable the node is unpowered, so there is no window in
+progress to lose — the node only executes while the Spotter is alive and attached
+to it. The realistic loss case narrows to a transient publish failure while the
+link is up, and `MS_Q_LEGACY` has accepted every attempt made against it.
+
+**Mote-side buffering is therefore not worth building.** It would mean persisting
+unsent packets to the W25 SPI flash across power cycles, tracking send state,
+retransmitting on later windows, and handling wear, corruption and ordering —
+several hundred lines and a new failure surface, to cover a risk already covered
+twice.
+
+Recovery path if cellular ever does drop for a stretch: `sd usb` on the Spotter
+makes the card readable over USB, and `chl_agg.log` is the complete record.
+
 ### The check no telemetry can make for you
 
 **Where the brush sits relative to the optical window.** If it parks on or across
@@ -647,8 +680,10 @@ chl sweep     # does it cross the full face?
 chl park && chl release
 ```
 
-Confirm by eye before sealing. It costs two minutes and it is the only failure
-mode here that is both invisible and total.
+**Confirmed by eye 2026-09-03: rest position is well clear of the sensor head.**
+Re-check after any disturbance to the brush or horn, since the endpoints are
+pulse widths tied to how the horn is clocked on the spline and carry no memory of
+where the window actually is.
 
 ---
 
