@@ -14,9 +14,33 @@ Dashboard: **https://chl-kimberlys-reef.fly.dev/**
 | | |
 |---|---|
 | ADC sample rate | once per second (`chlSamplePeriodMs`) |
-| Reported value | mean of one window, default 10 min = 600 samples (`chlAggPeriodMs`) |
-| Wiper | 2 out-and-back sweeps every 10 min (`chlWipeIntervalMin`, `chlWipeSweeps`) |
-| Transmitted | 47-byte binary packet per window, **cellular only** (`chlTxCellularOnly`) |
+| Reported value | mean of one window — see below, this is set by the bus schedule |
+| Wiper | 2 full-range out-and-back sweeps, once per bus power-on (`chlWipeOnBoot`) |
+| Transmitted | 47-byte binary packet per window, cellular with Iridium fallback |
+
+### As deployed on SPOT-32390C, 2026-09-03
+
+The Spotter duty-cycles the Bristlemouth bus, so the bus schedule — not
+`chlAggPeriodMs` — is what sets the measurement cadence.
+
+| Spotter (`bridge cfg … 0 s`) | | Mote (`chl set`) | |
+|---|---|---|---|
+| `sampleIntervalMs` | 600000 (10 min) | `chlFirstWindowMs` | 78000 |
+| `sampleDurationMs` | 90000 (90 s) | `chlSamplePeriodMs` | 1000 |
+| `subsampleEnabled` | 0 | `chlParkUs` | 600 |
+| `bridgePowerControllerEnabled` | 1 | `chlSweepUs` | 2400 |
+| `samplesPerReport` | 3 | `chlTravelMs` | 1550 |
+| | | `chlWipeIntervalMin` | 0 (boot wipe only) |
+| | | `chlStallMa` | 450 |
+
+That yields **76 samples per reported value, 144 packets/day, 2.83 Wh/day
+(9.4 % of average daily solar)**. The wiper sweeps the servo's full travel — more
+of the window swept per cycle, and parked further off the optical face between
+wipes, so less reflected light. Measured 6236 ms per cycle, 241 mA peak.
+
+`chlWipeIntervalMin` is 0 and that is correct, not disabled: uptime resets every
+power window, so a free-running interval longer than the window can never fire.
+`chlWipeOnBoot` is the schedule, and the bus interval sets the wipe interval.
 | Also logged | Dev Kit console; Spotter console; `bm/<node id>/chl_agg.log` on the Spotter SD card |
 
 Concentration is `ug/L = (volts - chlCalOffsetV) * chlCalScale`, the standard
@@ -62,6 +86,28 @@ is how to reconfigure without opening the Dev Kit enclosure:
 bm cfg set aeac746f4fcd791b u u chlWipeIntervalMin 60
 bm cfg commit aeac746f4fcd791b u
 ```
+
+### The bus schedule is the measurement schedule
+
+`sampleDurationMs` bounds everything the node can do in one power-on, and 13.2 s
+of every window is dead time before a clean sample exists:
+
+| Stage | |
+|---|---|
+| Boot and rail bring-up | ~1.5 s (overlaps the wipe delay) |
+| `chlFirstWipeDelayMs` | 2 s |
+| Wipe, 2 full-range sweeps | 6.2 s |
+| `chlSettleMs` | 3 s |
+| Transmit margin before the rail drops | 2 s |
+
+**Dead time is paid per window, not per minute.** Buy a finer cadence from
+`sampleIntervalMs`, never by splitting a window into subsamples — four 30 s
+subsamples cost the dead time four times and buy four copies of one measurement.
+See `docs/power-budget.md`.
+
+`samplesPerReport` (3 here) batches the *temperature* string's aggregations, so
+halving `sampleIntervalMs` doubles that string's row count. Changing the bus
+schedule for the chlorophyll node changes the temperature node's data rate too.
 
 ### Changing the wipe interval on a deployed buoy
 
@@ -305,14 +351,34 @@ harmless. Never interrupt a flash.
 
 4. **`chlStallMa` is a placeholder** (600 mA) until enough real cycles exist.
 
-5. **PCA9685 ALL-CALL vs the I2C mux.** Out of reset the PCA9685 also answers to
+5. **Topology changes need no action — verified 2026-09-03.** Inserting this node
+   third in the chain changed the network configuration CRC from `0xffb9b248` to
+   `0x4491bdef`. The bridge detects that itself, registers the new CRC
+   (`smConfigurationCrc` in its hardware partition) and uploads the new
+   configuration:
+
+   ```
+   The smConfigurationCrc is not in the known list! calc: 0x4491bdef Adding it.
+   Got CRC 4491bdef OLD CRC 0
+   Updating CRC and topology in report builder!
+   Updated reportBuilders max network sensor type list
+   ```
+
+   But it only runs that on a bridge init, and `sensorController` subscribes the
+   soft modules only after `_bridge_power_controller->waitForSignal(true, …)`.
+   **With `bridgePowerControllerEnabled = 0` for bench work, no topology sampling
+   or aggregation happens at all, and the temperature string stops reporting** -
+   `OLD CRC 0` shows the report builder holding no topology whatever. Restore the
+   power controller before concluding anything about missing temperature data.
+
+6. **PCA9685 ALL-CALL vs the I2C mux.** Out of reset the PCA9685 also answers to
    0x70, which is the TCA9546A mux. `setup()` clears it first thing, but
    `sensorsInit()` runs before user code and has already talked to the mux by
    then, so firmware cannot close the window at boot. The fix is a wiring change:
    take the PCA9685's VCC from the switched 5 V rail rather than the always-on
    3V3, so the part is unpowered until `enable5V()`.
 
-6. **The board's own `power |` log lines are noisier than before.** `setup()`
+7. **The board's own `power |` log lines are noisier than before.** `setup()`
    reconfigures both INA232s from 256× averaging to 16× so a wipe's current peak
    is not averaged into nothing. The quantisation floor is unchanged at 250 µA per
    LSB; only the random noise went up.

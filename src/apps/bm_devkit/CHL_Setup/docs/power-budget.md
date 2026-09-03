@@ -76,7 +76,19 @@ and buy four lots of the same measurement.
 sits above Sofar's own guidance for a sustainable Bristlemouth load even in the
 tropics. It would run on a good day in summer and fall behind in a cloudy week.
 
-**Recommended: D — 120 s every 20 min, subsampling off.**
+> **Superseded 2026-09-03.** The wiper now sweeps the servo's full 600–2400 µs
+> range rather than 45–135°, on the reasoning that more travel per cycle sweeps
+> more of the window and parks the brush further off the optical face. That takes
+> a cycle from 3.2 s to 6.2 s and the dead time per power-on from 10.2 s to
+> 13.2 s. And the interval is 10 min, matching a collaborator's inshore sondes.
+>
+> **As deployed: 90 s every 10 min, subsampling off** — 76 samples per reported
+> value, 2.83 Wh/day, 9.4 % of average daily solar, 144 packets/day. Re-run
+> `tools/power_budget.py` for the current table; the conclusions below about the
+> wiper being irrelevant to the budget, and about short windows wasting dead
+> time, are unchanged.
+
+**Original recommendation: D — 120 s every 20 min, subsampling off.**
 
 ```
 bridge cfg set 0 s u sampleIntervalMs 1200000   # 20 min, unchanged
@@ -100,6 +112,16 @@ finer than 20 minutes, take it from the interval rather than by splitting the wi
 — dead time is paid per window, not per minute.
 
 ## Effect on the temperature string
+
+**Measured, not assumed:** `samplesPerReport` is 3 on this Spotter, and the
+temperature string's aggregations are timestamped every `sampleIntervalMs` but
+transmitted three at a time. At the old 20-minute interval that is 3 rows per
+sensor arriving together every 60 min — which is exactly the 9 rows seen in one
+API query. **Halving the interval to 10 min therefore doubles the temperature row
+count to 432/day** and shortens the batch latency to 30 min. That is a real
+increase in the temperature string's share of cellular traffic, caused by a
+change made for the chlorophyll node.
+
 
 `sampleIntervalMs` is unchanged at 20 min in options B, D and E, so the aggregation
 cadence — and therefore the temperature data rate of 3 rows per 20 min, 216 rows a
