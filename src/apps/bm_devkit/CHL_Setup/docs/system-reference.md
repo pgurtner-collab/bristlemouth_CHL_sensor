@@ -634,6 +634,31 @@ dur 6233ms | temp 3 rows, positions [1, 2, 4]
 90 s rail drop; `n_dirty 9` is exactly the 6.2 s wipe plus 3 s settle excluded from
 the average, which is the wipe-exclusion logic doing its job on real data.
 
+### Recovery after a Spotter reboot — verified
+
+A Spotter reboot starts a new log session, and the node's `chl_agg` channel
+disappears from `log list` until the node next publishes. That is the PAR-project
+trap in outline — the Spotter creates `bm/<node id>/` at boot, and a node joining
+afterwards logs into nowhere while everything else looks healthy.
+
+**It does not bite here**, because the node re-publishes on every bus power cycle
+and that re-registers the channel. Verified 2026-09-03 after an SD eject rebooted
+the Spotter at 17:27:45Z:
+
+```
+17:31:25Z  CHL packet   0.2546 ug/L, uptime 83s, n_clean 69, wipes 1, peak 194mA
+17:31:31Z  temperature  3 rows, positions [1, 2, 4]
+           chl_agg re-registered, writing into session 0018_
+```
+
+Both payloads delivered in the same window, four minutes after the reboot, with
+no intervention. Nothing needs doing after a Spotter restart.
+
+### The log file is session-prefixed
+
+`0017_chl_agg.log`, not `chl_agg.log` — the Spotter prefixes each boot session.
+Looking for the unprefixed name finds nothing and looks like a missing log.
+
 ### Data durability — three layers, none of them ours to build
 
 An earlier version of these notes claimed the node has "no local buffering" and
