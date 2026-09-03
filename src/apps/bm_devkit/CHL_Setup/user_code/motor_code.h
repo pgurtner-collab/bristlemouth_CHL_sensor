@@ -44,6 +44,11 @@
 #define MOTOR_DEFAULT_TRAVEL_MS 800
 #define MOTOR_DEFAULT_SWEEPS 2
 
+/* Least current rise, over the pre-cycle baseline, that counts as the servo
+ * having actually drawn something. Below this the telemetry is assumed to be
+ * pointed at the wrong INA232 rather than at a servo that used no power. */
+#define MOTOR_MIN_WIPE_DELTA_MA 10
+
 /*! Per-wipe telemetry, captured while the servo is actually moving. */
 typedef struct {
   bool valid;             //!< false until the first wipe has completed

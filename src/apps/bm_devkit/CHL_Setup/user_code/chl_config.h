@@ -51,6 +51,8 @@ typedef struct {
 /*! Live values. Read directly; write only through chlCfgSet(). */
 typedef struct {
   uint32_t aggPeriodMs;
+  uint32_t firstWindowMs;
+  uint32_t firstWipeDelayMs;
   uint32_t samplePeriodMs;
   uint32_t wipeIntervalMin;
   uint32_t wipeSweeps;

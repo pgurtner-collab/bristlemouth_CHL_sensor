@@ -33,6 +33,44 @@ static const chlCfgEntry_t kTable[] = {
      "averaging + transmit window (needs reset)",
      {.u = 600000}, {.u = 5000}, {.u = 3600000}},
 
+    /* The FIRST averaging window after boot closes early, at this instead of
+     * chlAggPeriodMs.
+     *
+     * This exists because the Spotter does not leave the Bristlemouth bus
+     * powered. Its bridge power controller duty-cycles it - by default 5 min 10 s
+     * of power every 30 min - so a node's uptime resets every cycle and it never
+     * survives long enough for a 10 minute window to close. A node written to
+     * average over a period longer than the power window transmits nothing, ever,
+     * while looking perfectly healthy on a bench where USB keeps it alive.
+     *
+     * A short first window means one packet always gets out per power-on,
+     * whatever the bus schedule is set to and without this firmware needing to
+     * know it. On a bus that IS left on continuously, the effect is just one
+     * quick packet at boot followed by the normal chlAggPeriodMs cadence.
+     *
+     * Keep it comfortably inside the Spotter's sampleDurationMs: boot, wipe and
+     * settle burn the first ~15 s, and the packet has to be handed to the Spotter
+     * before the rail drops. */
+    /* 25 s, sized to fit inside a 30 s subsample window - the tightest schedule
+     * this buoy is actually configured for (SPOT-32390C, measured 2026-09-03:
+     * sampleInterval 20 min, sampleDuration 15.5 min, subsample 30 s every
+     * 5 min, so the longest continuous power-on is 30 SECONDS).
+     *
+     * Deliberately sized for the worst case rather than the expected one. Too
+     * short costs a thin first reading on a bus that is left powered; too long
+     * costs every reading on a bus that is not. Those are not comparable
+     * mistakes. */
+    {"chlFirstWindowMs", CHL_CFG_UINT, "ms",
+     "first window after boot closes at this, so a duty-cycled bus still yields data",
+     {.u = 25000}, {.u = 10000}, {.u = 3600000}},
+
+    /* 2 s, not 8. In a 30 s power window every second before the wipe is a
+     * second of clean sampling lost: wipe (3.2 s) plus settle (3 s) already eats
+     * a fifth of it. */
+    {"chlFirstWipeDelayMs", CHL_CFG_UINT, "ms",
+     "delay from boot to the first wiper cycle",
+     {.u = 2000}, {.u = 500}, {.u = 120000}},
+
     {"chlSamplePeriodMs", CHL_CFG_UINT, "ms",
      "how often the ADC is read (needs reset)",
      {.u = 1000}, {.u = 100}, {.u = 60000}},
@@ -71,13 +109,19 @@ static const chlCfgEntry_t kTable[] = {
      "peak wipe current above which the cycle is flagged as stalled",
      {.u = 600}, {.u = 10}, {.u = 5000}},
 
-    /* 0x41 (PoDL) rather than 0x43 (main) by default. Measured on the bench, the
-     * two track each other but PoDL sits upstream and reads a few mA higher on
-     * both baseline and peak - it is what the node actually draws from the buoy,
-     * which is the number the power budget cares about. */
+    /* 0x43 (MAIN).
+     *
+     * Corrected 2026-09-03 after measuring both with the Dev Kit powered from the
+     * Spotter's Bristlemouth bus, which is the deployed configuration: 0x43 reads
+     * 22 mA at rest and 54 mA during a wipe, while 0x41 sits at a flat -6 mA and
+     * does not respond to the servo at all. On a bench supply earlier the same
+     * day it was the other way round, which is why this is a config key - but the
+     * default should match the way the thing actually gets deployed.
+     *
+     * If a wipe reports no current rise, the firmware says so and names this key. */
     {"chlPwrAddr", CHL_CFG_UINT, "i2c",
-     "INA232 read for wipe current: 65 = 0x41 podl (draw from buoy), 67 = 0x43 main",
-     {.u = 0x41}, {.u = 0x40}, {.u = 0x4F}},
+     "INA232 read for wipe current: 67 = 0x43 main (correct on bus power), 65 = 0x41 podl",
+     {.u = 0x43}, {.u = 0x40}, {.u = 0x4F}},
 
     {"chlAdsPga", CHL_CFG_UINT, "idx",
      "ADS1115 range: 0=+-6.144 1=+-4.096 2=+-2.048 3=+-1.024 4=+-0.512 5=+-0.256 V",
@@ -106,17 +150,30 @@ static const chlCfgEntry_t kTable[] = {
      "reading is flagged as clipped at or above this; 26000 ~= 3.25 V on a 3V3 supply",
      {.u = 26000}, {.u = 1000}, {.u = 32767}},
 
-    /* Cellular only, no Iridium fallback.
+    /* 0 - use BmNetworkTypeCellularIriFallback. Do not set this to 1 without
+     * re-testing on the buoy.
      *
-     * BmNetworkTypeCellularIriFallback would silently switch to Iridium if
-     * cellular were unavailable, and Iridium is billed per message. At 144
-     * packets a day that is not a fallback, it is a bill. This buoy sits ~10 km
-     * off Naples FL where cellular should hold, and if it does not the packets
-     * still reach the Spotter's SD card to be recovered on retrieval - late data
-     * rather than expensive data. Set to 0 before any offshore deployment. */
+     * It was 1 for a few hours, on the reasoning that Iridium is billed per
+     * message and 144 packets a day should not risk falling back to it. That
+     * reasoning was fine and the conclusion was wrong: BmNetworkTypeCellularOnly
+     * lands in MS_Q_CELLULAR_ONLY, which on SPOT-32390C is shallow and is where
+     * the Spotter puts its own multi-kilobyte payloads. Measured 2026-09-03:
+     *
+     *   cellular only : [MS] [ERROR] Queue MS_Q_CELLULAR_ONLY is full.
+     *                   [BM_TX] [ERROR] Unable to submit message to cell-only queue
+     *   with fallback : [MS] [INFO] Added message (len 76) to queue MS_Q_LEGACY
+     *                   [BM_TX] [INFO] Submitted spotter/transmit-data ... Len: 48
+     *
+     * Every packet would have been dropped, and the mote would have reported
+     * success for all of them - spotter_tx_data() returns BmOK once the publish
+     * leaves the node, whatever the Spotter then does with it.
+     *
+     * The Iridium concern is real but bounded: fallback only engages when
+     * cellular is unavailable, and the packet is 47 bytes. Manage it with the
+     * packet size and cadence, not by choosing a queue that does not work. */
     {"chlTxCellularOnly", CHL_CFG_UINT, "bool",
-     "1 = cellular only; 0 = allow Iridium fallback (billed per message)",
-     {.u = 1}, {.u = 0}, {.u = 1}},
+     "1 = cellular only - REJECTED by this Spotter, its queue is full; 0 = with fallback",
+     {.u = 0}, {.u = 0}, {.u = 1}},
 
     /* Turner Designs C-FLUOR calibration, from this sensor head's certificate:
      *     ug/L = (measured volts - offset) * coefficient
@@ -144,6 +201,8 @@ const chlCfgEntry_t *chlCfgTable(size_t &count) {
 /*! Map a key name to the live struct field it backs. */
 static void *fieldFor(const char *key) {
   if (!strcmp(key, "chlAggPeriodMs")) return &chlCfg.aggPeriodMs;
+  if (!strcmp(key, "chlFirstWindowMs")) return &chlCfg.firstWindowMs;
+  if (!strcmp(key, "chlFirstWipeDelayMs")) return &chlCfg.firstWipeDelayMs;
   if (!strcmp(key, "chlSamplePeriodMs")) return &chlCfg.samplePeriodMs;
   if (!strcmp(key, "chlWipeIntervalMin")) return &chlCfg.wipeIntervalMin;
   if (!strcmp(key, "chlWipeSweeps")) return &chlCfg.wipeSweeps;

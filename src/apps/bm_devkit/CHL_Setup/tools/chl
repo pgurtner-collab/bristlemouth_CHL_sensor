@@ -36,7 +36,11 @@ ALWAYS = ("ERR", "WARN", "Error", "error", "FAIL", "STALL")
 
 # The board's own housekeeping, printed every couple of seconds. Useful
 # occasionally, noise the rest of the time.
-NOISE = ("hum_temp |", "pressure |", "power |")
+NOISE = ("hum_temp |", "pressure |", "power |",
+         # The Spotter dumps the full hex of every message it queues for the
+         # modem. Thousands of bytes, several times a minute, and it buries
+         # everything else.
+         "Message: ", "[MS] [INFO] Added message", "[GPS] [INFO]")
 
 # The mote's own top-level console commands, from `help`. Anything else typed
 # here is assumed to be a `chl` subcommand and gets the prefix added, so
@@ -49,10 +53,17 @@ TOP_LEVEL = {
 }
 
 
-def as_console_command(words):
-    """Turn shell-side words into the line the board expects."""
+def as_console_command(words, spotter=False):
+    """Turn shell-side words into the line the board expects.
+
+    Nothing is prefixed when talking to the Spotter: the chl app runs on the
+    mote, so every command typed at a Spotter console is one of its own
+    (`bridge`, `bm`, `cfg`, `log`, ...) and adding a prefix would only corrupt it.
+    """
     if not words:
         return ""
+    if spotter:
+        return " ".join(words)
     # `cfg` is the one genuine collision: the board has a `cfg` command and so
     # does the chl app. The board's always takes a partition first
     # (`cfg usr set ...`), so that disambiguates it; a bare `cfg` means the chl
@@ -158,7 +169,7 @@ def main():
         return
 
     if rest:
-        send(ser, as_console_command(rest))
+        send(ser, as_console_command(rest, args.spotter))
         read_for(ser, args.wait, "raw" if args.all else "response")
         return
 
@@ -176,7 +187,7 @@ def main():
             if cmd in ("exit", "quit"):
                 break
             if cmd:
-                send(ser, as_console_command(cmd.split()))
+                send(ser, as_console_command(cmd.split(), args.spotter))
             read_for(ser, args.wait if cmd else 2.0,
                      "response" if cmd else "watch")
     except KeyboardInterrupt:

@@ -43,9 +43,6 @@
 #define LED_ON_TIME_MS 20
 #define LED_PERIOD_MS 1000
 
-// Leave a gap after boot before the first wiper cycle, so the console banner is
-// readable and the servo rail has settled.
-#define FIRST_WIPE_DELAY_MS 15000
 
 /* Sample-buffer sizing. AveragingSampler stores a double per sample, so the
  * cap below is ~32 kB of heap in the worst case. The bounds on aggPeriodMs and
@@ -312,12 +309,22 @@ void chlAppReportNow(void) {
    * the call actually failed. Compare against BmOK explicitly. */
   const BmSerialNetworkType net = chlCfg.txCellularOnly ? BmNetworkTypeCellularOnly
                                                         : BmNetworkTypeCellularIriFallback;
+  /* BmOK here means only that the publish left this node. It says nothing about
+   * whether the Spotter accepted it, queued it, or transmitted it - that is
+   * decided Spotter-side and reported only on the Spotter's own console. Do not
+   * word this as if it were a delivery confirmation: on 2026-09-03 the mote
+   * printed success for packets the Spotter was rejecting outright with
+   * "Queue MS_Q_CELLULAR_ONLY is full", and the wording is what made that take
+   * two consoles to notice. */
   BmErr tx_err = spotter_tx_data(tx_data, CHL_DATA_SIZE, net);
   if (tx_err == BmOK) {
-    printf("[chl-agg] | transmit request accepted by Spotter (%u bytes, %s)\n",
+    printf("[chl-agg] | published %u bytes to the Spotter (%s). NOT a delivery "
+           "confirmation - check the Spotter console for \"Submitted "
+           "spotter/transmit-data\".\n",
            (unsigned)CHL_DATA_SIZE, chlCfg.txCellularOnly ? "cellular only" : "cell+iridium");
   } else {
-    printf("[chl-agg] | ERR transmit request rejected, BmErr=%d\n", tx_err);
+    printf("[chl-agg] | ERR publish failed before it even reached the Spotter, BmErr=%d\n",
+           tx_err);
   }
 
   voltsSum = 0.0;
@@ -351,9 +358,13 @@ void chlAppStatus(void) {
     printf("  reading   : FAILED\n");
   }
 
-  printf("  window    : %lu ms, sampling every %lu ms, %lu clean samples buffered so far\n",
-         (unsigned long)chlCfg.aggPeriodMs, (unsigned long)chlCfg.samplePeriodMs,
-         (unsigned long)chlSamples.getNumSamples());
+  printf("  window    : first %lu ms then %lu ms, sampling every %lu ms, %lu clean samples "
+         "buffered so far\n",
+         (unsigned long)chlCfg.firstWindowMs, (unsigned long)chlCfg.aggPeriodMs,
+         (unsigned long)chlCfg.samplePeriodMs, (unsigned long)chlSamples.getNumSamples());
+  printf("  uptime    : %lus  (if this keeps resetting, the Spotter's bridge power "
+         "controller is duty-cycling the bus)\n",
+         (unsigned long)(uptimeGetMs() / 1000));
   printf("  wiper     : %s, %s, pulse now %u us\n", motorIsReady() ? "ready" : "NOT INITIALIZED",
          motorIsBusy() ? "MOVING" : "idle", motorGetPulseUs());
   printf("  endpoints : park %u us, sweep %u us, travel %u ms, %u sweeps, stall > %u mA\n",
@@ -462,8 +473,12 @@ void setup(void) {
     }
   }
 
-  // Size the clean-sample buffer for the configured window.
-  maxSamples = (chlCfg.aggPeriodMs / chlCfg.samplePeriodMs) + SAMPLE_MARGIN;
+  /* Size the clean-sample buffer for whichever window is longer. Normally that
+   * is aggPeriodMs, but firstWindowMs can legitimately be set larger on a bus
+   * that is left powered continuously. */
+  const uint32_t longestWindowMs =
+      (chlCfg.firstWindowMs > chlCfg.aggPeriodMs) ? chlCfg.firstWindowMs : chlCfg.aggPeriodMs;
+  maxSamples = (longestWindowMs / chlCfg.samplePeriodMs) + SAMPLE_MARGIN;
   if (maxSamples > MAX_SAMPLES_CAP) {
     printf("WARN - window/sample period needs %lu samples, capping at %d. Readings past the "
            "cap will be dropped from each window.\n",
@@ -496,7 +511,7 @@ void loop(void) {
   static bool firstWipeDone = false;
   if (chlCfg.wipeIntervalMin > 0) {
     if (!firstWipeDone) {
-      if ((uint32_t)uptimeGetMs() >= FIRST_WIPE_DELAY_MS) {
+      if ((uint32_t)uptimeGetMs() >= chlCfg.firstWipeDelayMs) {
         firstWipeDone = true;
         motorCleanTimer = (uint32_t)uptimeGetMs();
         if (chlCfg.wipeOnBoot) {
@@ -556,10 +571,15 @@ void loop(void) {
     }
   }
 
-  // Close the averaging window on schedule.
+  /* Close the averaging window on schedule. The first window after boot is
+   * short - see chlFirstWindowMs - so that a node on a duty-cycled Bristlemouth
+   * bus gets a packet out before the rail drops. */
   static uint32_t aggTimer = uptimeGetMs();
-  if ((uint32_t)uptimeGetMs() - aggTimer >= chlCfg.aggPeriodMs) {
-    aggTimer += chlCfg.aggPeriodMs; // advance by the period so windows don't drift
+  static bool firstWindowDone = false;
+  const uint32_t windowMs = firstWindowDone ? chlCfg.aggPeriodMs : chlCfg.firstWindowMs;
+  if ((uint32_t)uptimeGetMs() - aggTimer >= windowMs) {
+    aggTimer += windowMs; // advance by the period so windows don't drift
+    firstWindowDone = true;
     chlAppReportNow();
   }
 

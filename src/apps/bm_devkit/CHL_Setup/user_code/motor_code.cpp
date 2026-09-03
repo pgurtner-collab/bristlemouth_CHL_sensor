@@ -293,8 +293,33 @@ public:
 };
 
 static BusMonitor busMonitor(&i2c1, I2C_INA_MAIN_ADDR);
+static uint8_t busMonitorAddr = I2C_INA_MAIN_ADDR;
 
-void motorSetPowerMonitorAddress(uint8_t address) { busMonitor.setAddress(address); }
+void motorSetPowerMonitorAddress(uint8_t address) {
+  busMonitor.setAddress(address);
+  busMonitorAddr = address;
+}
+
+/* Read the bus current as a MAGNITUDE.
+ *
+ * Which way current reads through the shunt depends on which INA232 is selected
+ * and how the rail is fed. Measured on this board with the Dev Kit powered from
+ * the Spotter's Bristlemouth bus: 0x43 reads +22 mA idle and +54 mA during a
+ * wipe, while 0x41 sits at a flat -6 mA and does not respond to the servo at
+ * all. On the bench supply it was the other way round. The sign is a fact about
+ * wiring, not about the servo - and letting a negative value reach the uint16
+ * packet fields reported a wipe mean of 65531 mA. */
+static bool readBusMagnitudeMa(uint16_t &milliamps) {
+  int32_t ma = 0;
+  if (!busMonitor.readCurrentMa(ma)) {
+    return false;
+  }
+  if (ma < 0) {
+    ma = -ma;
+  }
+  milliamps = (ma > UINT16_MAX) ? UINT16_MAX : (uint16_t)ma;
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Cleaning motor
@@ -411,8 +436,8 @@ static uint32_t motorNextStepMs = 0;
 
 // Current accumulators for the cycle in progress.
 static uint32_t cycleStartMs = 0;
-static int32_t cyclePeakMa = 0;
-static int64_t cycleSumMa = 0;
+static uint32_t cyclePeakMa = 0;
+static uint64_t cycleSumMa = 0;
 static uint32_t cycleSamples = 0;
 
 bool motorIsBusy(void) { return (motorState != MOTOR_STATE_IDLE); }
@@ -434,9 +459,8 @@ bool motorStartCleaningCycle(uint8_t sweeps) {
    * draw is reported against what the node was drawing a moment earlier rather
    * than against an assumed idle figure. Everything else on the board - the
    * radio, the ADC, the LEDs - moves that baseline around. */
-  int32_t baseline = 0;
-  lastWipe.baseline_ma = busMonitor.readCurrentMa(baseline) ? (uint16_t)(baseline > 0 ? baseline : 0)
-                                                            : 0;
+  uint16_t baseline = 0;
+  lastWipe.baseline_ma = readBusMagnitudeMa(baseline) ? baseline : 0;
 
   printf("[motor] Starting cleaning cycle, %u sweep(s), %u -> %u us.\n", (unsigned)sweeps,
          motorCfg.park_us, motorCfg.sweep_us);
@@ -467,8 +491,8 @@ static void motorFinishCycle(bool aborted) {
   lastWipe.end_uptime_s = (uint32_t)(uptimeGetMs() / 1000);
   const uint32_t dur = (uint32_t)uptimeGetMs() - cycleStartMs;
   lastWipe.duration_ms = (dur > UINT16_MAX) ? UINT16_MAX : (uint16_t)dur;
-  lastWipe.peak_ma = (cyclePeakMa > 0) ? (uint16_t)cyclePeakMa : 0;
-  lastWipe.mean_ma = cycleSamples ? (uint16_t)(cycleSumMa / (int64_t)cycleSamples) : 0;
+  lastWipe.peak_ma = (cyclePeakMa > UINT16_MAX) ? UINT16_MAX : (uint16_t)cyclePeakMa;
+  lastWipe.mean_ma = cycleSamples ? (uint16_t)(cycleSumMa / (uint64_t)cycleSamples) : 0;
   lastWipe.samples = (cycleSamples > UINT16_MAX) ? UINT16_MAX : (uint16_t)cycleSamples;
   lastWipe.stalled = (lastWipe.peak_ma >= motorCfg.stall_ma);
 
@@ -476,6 +500,18 @@ static void motorFinishCycle(bool aborted) {
          lastWipe.count, aborted ? "ABORTED" : "complete", lastWipe.duration_ms,
          lastWipe.baseline_ma, lastWipe.mean_ma, lastWipe.peak_ma, lastWipe.samples,
          lastWipe.stalled ? "  *** STALL THRESHOLD EXCEEDED ***" : "");
+
+  /* A cycle that drew no more than it was drawing at rest means the telemetry is
+   * measuring the wrong thing. Worth saying out loud: silently reporting a flat
+   * zero peak for a whole deployment would look like a working wiper right up
+   * until someone tried to use the numbers. */
+  if (lastWipe.samples &&
+      lastWipe.peak_ma <= (uint32_t)lastWipe.baseline_ma + MOTOR_MIN_WIPE_DELTA_MA) {
+    printf("[motor] WARN no current rise during the cycle (base %u, peak %u mA). Either the "
+           "servo is not drawing, or the INA232 at 0x%02X is not the monitor carrying the "
+           "servo rail - compare both with `chl wipe --all` and set chlPwrAddr.\n",
+           lastWipe.baseline_ma, lastWipe.peak_ma, (unsigned)busMonitorAddr);
+  }
 }
 
 void motorService(void) {
@@ -487,8 +523,8 @@ void motorService(void) {
    * roughly 100 Hz, so a default 800 ms leg yields on the order of 70 readings.
    * A failed read is skipped rather than counted as zero, which would drag the
    * mean down and hide a problem. */
-  int32_t ma = 0;
-  if (busMonitor.readCurrentMa(ma)) {
+  uint16_t ma = 0;
+  if (readBusMagnitudeMa(ma)) {
     if (ma > cyclePeakMa) {
       cyclePeakMa = ma;
     }
