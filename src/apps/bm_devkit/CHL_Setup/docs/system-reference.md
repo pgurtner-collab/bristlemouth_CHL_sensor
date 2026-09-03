@@ -603,6 +603,55 @@ regardless of traffic.
 
 ---
 
+## 9a. Pre-deployment verification — 2026-09-03
+
+Run before sealing. Everything here was checked on the hardware, not asserted.
+
+| Check | Result |
+|---|---|
+| Firmware | `CHL_Setup@ENG-v0.13.12-rc.1-2-g1e88d9f8+536809a1` |
+| **All 19 config keys survive a power cycle** | reset, re-read, byte-identical |
+| Calibration | `(V − 0.0291) × 24.6872`, clip flag 79.5 µg/L |
+| Transmit type | cellular **with Iridium fallback** |
+| Bridge | controller 1, 600000/90000 ms, subsample 0, samplesPerReport 1 |
+| Analog chain | torch → responds; dye titration → linear, matches a YSI EXO; certificate → scale |
+| Temperature | reporting, positions [1, 2, 4]; Sofar's dashboard renders Sensor 4 |
+| **One complete unattended cycle** | see below |
+
+The config-persistence check is not ceremonial. A duty-cycled bus power-cycles the
+node every 10 minutes, so a key that was set but never written to NVM would revert
+on the first cycle after deployment — and would have looked correct on the bench
+right up to the moment the buoy went in the water.
+
+The unattended cycle, no intervention:
+
+```
+chl 0.3574 ug/L, uptime 83s, n_clean 69, n_dirty 9, wipes 1, peak 192mA,
+dur 6233ms | temp 3 rows, positions [1, 2, 4]
+```
+
+`uptime 83s` shows a fresh boot from a bus power-cycle that transmitted before the
+90 s rail drop; `n_dirty 9` is exactly the 6.2 s wipe plus 3 s settle excluded from
+the average, which is the wipe-exclusion logic doing its job on real data.
+
+### The check no telemetry can make for you
+
+**Where the brush sits relative to the optical window.** If it parks on or across
+the face, every reading for the whole deployment is blocked — and nothing in the
+data would say so. Packet counts, current draw and sample counts would all look
+perfect while the numbers were meaningless.
+
+```
+chl park      # look: is the brush fully clear of the window?
+chl sweep     # does it cross the full face?
+chl park && chl release
+```
+
+Confirm by eye before sealing. It costs two minutes and it is the only failure
+mode here that is both invisible and total.
+
+---
+
 ## 10. Before sealing it up — do a wet test
 
 The torch test proved the optical and electrical chain: the C-FLUOR drives the
