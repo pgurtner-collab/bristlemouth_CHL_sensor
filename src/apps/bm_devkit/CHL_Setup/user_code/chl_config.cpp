@@ -164,9 +164,14 @@ static const chlCfgEntry_t kTable[] = {
      *   with fallback : [MS] [INFO] Added message (len 76) to queue MS_Q_LEGACY
      *                   [BM_TX] [INFO] Submitted spotter/transmit-data ... Len: 48
      *
-     * Every packet would have been dropped, and the mote would have reported
-     * success for all of them - spotter_tx_data() returns BmOK once the publish
-     * leaves the node, whatever the Spotter then does with it.
+     * That queue is not permanently full - an earlier cellular-only packet did
+     * get through, five minutes before one was rejected. It fills when the
+     * Spotter has its own large payloads in flight (a 5930-byte message went
+     * into it at 15:05). Intermittent is worse than broken: packets would be
+     * dropped unpredictably, and the mote would report success for every one of
+     * them, because spotter_tx_data() returns BmOK once the publish leaves the
+     * node whatever the Spotter then does with it. MS_Q_LEGACY accepted every
+     * attempt.
      *
      * The Iridium concern is real but bounded: fallback only engages when
      * cellular is unavailable, and the packet is 47 bytes. Manage it with the
